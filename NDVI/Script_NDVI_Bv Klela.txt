@@ -1,0 +1,25 @@
+///ROI : table ....Bv_Klela
+/// suite du script NDVI
+var S2 = ee.ImageCollection("COPERNICUS/S2_HARMONIZED")
+.filterDate('2022-10-01', '2022-10-30')
+.filterBounds(ROI)
+.median();
+Map.centerObject(ROI, 10);
+print(S2);
+
+var NIR = S2.select('B8');
+var RED = S2.select('B4');
+var ndvi = NIR.subtract(RED).divide(NIR.add(RED)).rename('NDVI');
+var NDVI = ndvi.clip(ROI)
+
+var ndviparam = {min: -1,max:1, palette : ['Blue','yellow','green']};
+Map.addLayer(NDVI, ndviparam, 'NDVI');
+
+Export.image.toDrive({
+  image:NDVI.select('NDVI'),
+  description:'NDVI_10-22_bvKl',
+  folder: "Data_RS-GIS",
+  scale:10,
+  region:ROI,
+  maxPixels: 1e13,
+});

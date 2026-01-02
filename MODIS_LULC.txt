@@ -1,0 +1,216 @@
+// === 1. Configuration ===
+var years = [2001, 2005, 2010, 2015, 2020, 2023];
+var defaultVisibleYear = 2023;
+var modisLayers = {};
+var selectedCountryName = null;
+var selectedCountryGeom = null;
+
+var classNames = [
+  'Water Bodies', 'Evergreen Needleleaf Forests', 'Evergreen Broadleaf Forests',
+  'Deciduous Needleleaf Forests', 'Deciduous Broadleaf Forests', 'Mixed Forests',
+  'Closed Shrublands', 'Open Shrublands', 'Woody Savannas', 'Savannas',
+  'Grasslands', 'Permanent Wetlands', 'Croplands', 'Urban and Built-up Lands',
+  'Cropland/Natural Vegetation Mosaics', 'Permanent Snow and Ice', 'Barren',
+  'Unclassified'
+];
+
+var palette = [
+  '#1c0dff', '#05450a', '#086a10', '#54a708', '#78d203', '#009900',
+  '#c6b044', '#dcd159', '#dade48', '#fbff13', '#b6ff05', '#27ff87',
+  '#c24f44', '#a5a5a5', '#ff6d4c', '#69fff8', '#f9ffa4', '#ffffff'
+];
+
+// === 2. Global Panels ===
+var chartPanel = ui.Panel({style: {position: 'bottom-right', width: '450px'}});
+var legendPanel = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px',
+    backgroundColor: 'white',
+    maxHeight: '400px'
+  }
+});
+var creditsPanel = ui.Panel({
+  style: {
+    position: 'bottom-center',
+    padding: '6px',
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    stretch: 'horizontal'
+  }
+});
+creditsPanel.add(ui.Label({
+  value: 'Developed by Dr. Cesar Ivan Alvarez · University of Augsburg  · 📧 cesar.alvarez@uni-a.de',
+  style: {fontSize: '11px', textAlign: 'center'}
+}));
+creditsPanel.add(ui.Label({
+  value: 'LinkedIn Profile',
+  style: {fontSize: '11px', color: 'blue', textAlign: 'center'},
+  targetUrl: 'https://www.linkedin.com/in/cesar-ivan-alvarez-0847253a/'
+}));
+
+creditsPanel.add(ui.Label({
+  value: 'ℹ️ Note: Chart generation may take longer for large countries. Source: MODIS Land Cover Type Product (MCD12Q1 v061)',
+  style: {fontSize: '11px', color: '#555', textAlign: 'center'}
+}));
+
+Map.add(chartPanel);
+Map.add(legendPanel);
+Map.add(creditsPanel);
+
+// === 3. UI Components ===
+var countries = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017");
+
+var countrySelect = ui.Select({ placeholder: 'Select country' });
+
+var yearSelect = ui.Select({
+  items: years.map(String),
+  placeholder: 'Select year',
+  value: String(defaultVisibleYear)
+});
+
+var chartButton = ui.Button({
+  label: 'Generate Land Cover Chart',
+  disabled: true,
+  onClick: generateChart
+});
+
+
+
+var controlPanel = ui.Panel({
+  widgets: [
+    ui.Label('📚Land Cover 2001 - 2023 by Country📚', {fontWeight: 'bold'}),
+    ui.Label('🌍 Select Country & 📊 Chart Year', {fontWeight: 'bold'}),
+    countrySelect,
+    yearSelect,
+    chartButton
+  ],
+  style: {position: 'top-left', padding: '8px'}
+});
+Map.add(controlPanel);
+
+// === 4. Load country list ===
+countries.aggregate_array('country_na').distinct().sort().evaluate(function(names) {
+  countrySelect.items().reset(names);
+});
+
+// === 5. On country selection ===
+countrySelect.onChange(function(name) {
+  if (!name) return;
+
+  selectedCountryName = name;
+  chartPanel.clear();
+  legendPanel.clear();
+  Map.layers().reset();
+
+  var country = countries.filter(ee.Filter.eq('country_na', name));
+  selectedCountryGeom = country.geometry();
+
+  Map.centerObject(country, 5);
+
+  modisLayers = {};
+  years.forEach(function(year) {
+    var img = ee.ImageCollection("MODIS/061/MCD12Q1")
+      .filter(ee.Filter.calendarRange(year, year, 'year'))
+      .first()
+      .select('LC_Type1')
+      .clip(country);
+
+    var layer = ui.Map.Layer(img, {
+      min: 0,
+      max: 17,
+      palette: palette
+    }, 'MODIS Land Cover ' + year, year === defaultVisibleYear);
+
+    Map.layers().add(layer);
+    modisLayers[year] = img;
+  });
+
+  addLegend();
+  chartButton.setDisabled(false);
+});
+
+// === 6. Generate Pie Chart ===
+function generateChart() {
+  var year = parseInt(yearSelect.getValue(), 10);
+  var img = modisLayers[year];
+  chartPanel.clear();
+
+  if (!img || !selectedCountryGeom) {
+    print('❌ Missing image or geometry.');
+    return;
+  }
+
+  var histogramDict = img.reduceRegion({
+    reducer: ee.Reducer.frequencyHistogram(),
+    geometry: selectedCountryGeom,
+    scale: 500,
+    maxPixels: 1e13
+  }).get('LC_Type1');
+
+  var PIXEL_AREA_M2 = 500 * 500;
+
+  histogramDict.evaluate(function(histogram) {
+    if (!histogram) {
+      print('❌ No data found');
+      return;
+    }
+
+    var features = [];
+    var colors = [];
+
+    for (var key in histogram) {
+      var id = parseInt(key);
+      var name = classNames[id] || 'Unknown';
+      var count = histogram[key];
+      var area = count * PIXEL_AREA_M2;
+      features.push(ee.Feature(null, {
+        'Land Cover': name,
+        'Area (m²)': area
+      }));
+      colors.push(palette[id] || '#000000');
+    }
+
+    var fc = ee.FeatureCollection(features);
+
+    var chart = ui.Chart.feature.byFeature({
+      features: fc,
+      xProperty: 'Land Cover',
+      yProperties: ['Area (m²)']
+    })
+    .setChartType('PieChart')
+    .setOptions({
+      title: 'Land Cover in ' + selectedCountryName + ' - ' + year,
+      legend: {position: 'right'},
+      pieHole: 0.4,
+      colors: colors
+    });
+
+    chartPanel.add(chart);
+  });
+}
+
+// === 7. Add MODIS Legend ===
+function addLegend() {
+  legendPanel.clear();
+  legendPanel.add(ui.Label({
+    value: 'MODIS Land Cover Legend',
+    style: {fontWeight: 'bold', fontSize: '14px', margin: '0 0 8px 0'}
+  }));
+
+  for (var i = 0; i < classNames.length; i++) {
+    var colorBox = ui.Label('', {
+      backgroundColor: palette[i],
+      padding: '8px',
+      margin: '0 8px 0 0'
+    });
+
+    var description = ui.Label(classNames[i], {margin: '0 0 4px 0'});
+
+    var row = ui.Panel({
+      widgets: [colorBox, description],
+      layout: ui.Panel.Layout.Flow('horizontal')
+    });
+
+    legendPanel.add(row);
+  }
+}
