@@ -1,0 +1,52 @@
+var S2_SR = ee.ImageCollection('COPERNICUS/S2_SR').filterBounds(PIM_Gnimi);
+Map.addLayer(PIM_Gnimi);
+Map.centerObject(PIM_Gnimi,10);
+var filtered = S2_SR.filter(ee.Filter.bounds(PIM_Gnimi))
+ .filter(ee.Filter.date('2025-01-01', '2025-12-31'))
+ .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10));
+ var filtered = S2_SR.filter(ee.Filter.bounds(PIM_Gnimi))
+ .filter(ee.Filter.date('2025-01-01', '2025-12-31'))
+ .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10));
+ var rgbVis = {min: 0.0, max: 3000, bands: ['B4', 'B3', 'B2']};
+ var newmerge_median = filtered.median()
+ //displaying layer
+
+var newmerge_clip = newmerge_median.clip(PIM_Gnimi);
+Map.addLayer(newmerge_clip, rgbVis);
+// Write a function that computes NDVI for an image and adds it as a band
+function addNDVI(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('ndvi');
+  return image.addBands(ndvi);
+}
+
+// Map the function over the collection
+var withNdvi = filtered.map(addNDVI);
+
+var composite = withNdvi.median();
+
+var ndviComposite = composite.select('ndvi').clip(PIM_Gnimi);
+
+var palette = [
+  'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718',
+  '74A901', '66A000', '529400', '3E8601', '207401', '056201',
+  '004C00', '023B01', '012E01', '011D01', '011301'];
+
+var ndviVis = {min:0, max:0.5, palette: palette };
+Map.addLayer(ndviComposite, ndviVis, 'ndvi');
+// Display a time-series chart of the mean NDVI value for the Farm region over time, using the filtered and NDVI-computed image collection
+var chart = ui.Chart.image.seriesByRegion({
+imageCollection: withNdvi.select('ndvi'),
+regions: PIM_Gnimi,
+reducer: ee.Reducer.mean(),
+scale: 10,
+seriesProperty: 'label', // add a series property to differentiate the regions
+xProperty: 'system:time_start' // specify the x-axis as the image time
+})
+.setOptions({
+lineWidth: 1,
+title: 'Evolution NDVI PIM Gnimitongo',
+interpolateNulls: true,
+vAxis: {title: 'NDVI'},
+hAxis: {title: '', format: 'YYYY-MMM'}
+});
+print(chart);

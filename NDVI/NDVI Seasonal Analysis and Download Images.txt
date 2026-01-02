@@ -1,0 +1,207 @@
+// NDVI Seasonal Analysis and Download Script
+// This script calculates NDVI for different seasons and allows image download
+
+
+// Define time periods for seasons
+var year = 2023; // Change to desired year
+var seasons = {
+  'Spring': [ee.Date.fromYMD(year, 3, 1), ee.Date.fromYMD(year, 5, 31)],
+  'Summer': [ee.Date.fromYMD(year, 6, 1), ee.Date.fromYMD(year, 8, 31)],
+  'Fall': [ee.Date.fromYMD(year, 9, 1), ee.Date.fromYMD(year, 11, 30)],
+  'Winter': [ee.Date.fromYMD(year, 12, 1), ee.Date.fromYMD(year + 1, 2, 28)]
+};
+
+// Choose satellite dataset (Sentinel-2 or Landsat)
+var dataset = 'Sentinel-2'; // Options: 'Sentinel-2', 'Landsat-8'
+
+// Function to get appropriate dataset
+function getCollection(seasonName, startDate, endDate) {
+  if (dataset === 'Sentinel-2') {
+    return ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+      .filterBounds(roi)
+      .filterDate(startDate, endDate)
+      .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+      .median()
+      .clip(roi);
+  } else if (dataset === 'Landsat-8') {
+    return ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+      .filterBounds(roi)
+      .filterDate(startDate, endDate)
+      .median()
+      .clip(roi);
+  }
+}
+
+// Function to calculate NDVI
+function calculateNDVI(image) {
+  if (dataset === 'Sentinel-2') {
+    var nir = image.select('B8');      // NIR band
+    var red = image.select('B4');      // Red band
+  } else if (dataset === 'Landsat-8') {
+    var nir = image.select('SR_B5');   // NIR band
+    var red = image.select('SR_B4');   // Red band
+  }
+  
+  var ndvi = nir.subtract(red).divide(nir.add(red)).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// Process each season and create NDVI composites
+var seasonalNDVI = {};
+var seasonalImages = {};
+
+for (var season in seasons) {
+  var dates = seasons[season];
+  var seasonImage = getCollection(season, dates[0], dates[1]);
+  var ndviImage = calculateNDVI(seasonImage);
+  
+  seasonalNDVI[season] = ndviImage.select('NDVI');
+  seasonalImages[season] = seasonImage;
+}
+
+// Create visualization parameters for NDVI
+var ndviParams = {
+  min: -0.2,
+  max: 0.8,
+  palette: [
+    'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', 
+    '74A901', '66A000', '529400', '3E8601', '207401', '056201',
+    '004C00', '023B01', '012E01', '011D01', '011301'
+  ]
+};
+
+// Add seasonal NDVI maps to the map
+Map.centerObject(roi, 8);
+
+for (var season in seasonalNDVI) {
+  Map.addLayer(seasonalNDVI[season], ndviParams, season + ' NDVI ' + year, false);
+}
+
+// Add true color reference layer
+var trueColorParams = {
+  bands: dataset === 'Sentinel-2' ? ['B4', 'B3', 'B2'] : ['SR_B4', 'SR_B3', 'SR_B2'],
+  min: 0,
+  max: 3000
+};
+
+var summerImage = seasonalImages['Summer'];
+Map.addLayer(summerImage, trueColorParams, 'Summer True Color', false);
+
+// Create a chart showing NDVI distribution for each season
+var chart = ui.Chart.image.histogram({
+  image: ee.ImageCollection([
+    seasonalNDVI['Spring'].rename('Spring'),
+    seasonalNDVI['Summer'].rename('Summer'),
+    seasonalNDVI['Fall'].rename('Fall'),
+    seasonalNDVI['Winter'].rename('Winter')
+  ]),
+  region: roi,
+  scale: 100,
+  maxPixels: 1e8
+}).setOptions({
+  title: 'Seasonal NDVI Distribution - ' + year,
+  hAxis: {title: 'NDVI Value'},
+  vAxis: {title: 'Pixel Count'},
+  colors: ['green', 'darkgreen', 'orange', 'blue']
+});
+
+print(chart);
+
+// Function to download NDVI images
+function downloadNDVI(season, image) {
+  // Convert to Int16 to reduce file size
+  var ndviInt16 = image.multiply(10000).int16();
+  
+  Export.image.toDrive({
+    image: ndviInt16,
+    description: 'NDVI_' + season + '_' + year + '_' + dataset,
+    scale: 30, // Adjust scale as needed (10 for Sentinel-2, 30 for Landsat)
+    region: roi,
+    maxPixels: 1e9,
+    crs: 'EPSG:4326',
+    fileFormat: 'GeoTIFF'
+  });
+}
+
+// Create download buttons for each season
+var downloadPanel = ui.Panel({
+  widgets: [
+    ui.Label('Download Seasonal NDVI Images', {fontWeight: 'bold', fontSize: '16px'})
+  ],
+  layout: ui.Panel.Layout.Flow('horizontal'),
+  style: {position: 'bottom-left'}
+});
+
+for (var season in seasonalNDVI) {
+  var button = ui.Button({
+    label: 'Download ' + season + ' NDVI',
+    onClick: function() {
+      var seasonName = this.getLabel().replace('Download ', '').replace(' NDVI', '');
+      downloadNDVI(seasonName, seasonalNDVI[seasonName]);
+    }
+  });
+  downloadPanel.add(button);
+}
+
+// Add download panel to the map
+Map.add(downloadPanel);
+
+// Print dataset information
+print('Dataset:', dataset);
+print('Year:', year);
+print('ROI:', roi);
+print('Seasonal NDVI Images:', ee.ImageCollection([
+  seasonalNDVI['Spring'].rename('spring_ndvi'),
+  seasonalNDVI['Summer'].rename('summer_ndvi'),
+  seasonalNDVI['Fall'].rename('fall_ndvi'),
+  seasonalNDVI['Winter'].rename('winter_ndvi')
+]));
+
+// Add legend
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-right',
+    padding: '8px 15px'
+  }
+});
+
+var legendTitle = ui.Label({
+  value: 'NDVI Scale',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '18px',
+    margin: '0 0 4px 0',
+    padding: '0'
+  }
+});
+
+legend.add(legendTitle);
+
+// Create the legend items
+var makes = function(color, name) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: color,
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: name,
+    style: {margin: '0 0 4px 6px'}
+  });
+
+  return ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+};
+
+// Add legend items for key NDVI ranges
+legend.add(makes('#CE7E45', 'Bare soil/Urban (-0.2 - 0)'));
+legend.add(makes('#FCD163', 'Sparse vegetation (0 - 0.2)'));
+legend.add(makes('#99B718', 'Moderate vegetation (0.2 - 0.5)'));
+legend.add(makes('#3E8601', 'Dense vegetation (0.5 - 0.8)'));
+
+Map.add(legend);

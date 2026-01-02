@@ -1,0 +1,243 @@
+// Script for Downloading Seasonal NDVI Images with Polygon Boundary
+// Google Earth Engine
+
+// Define your study area polygon
+// Option 1: Draw polygon manually using the geometry tools
+// var aoi = Geometry.Polygon; // Replace with your drawn geometry
+
+// Option 2: Define coordinates manually
+//var studyArea = ee.Geometry.Polygon([
+   //[[long1, lat1], [long2, lat2], [long3, lat3], [long4, lat4]]
+  // ]);
+
+// Option 3: Load from existing FeatureCollection
+var ROI = ee.FeatureCollection('aoi').geometry();
+
+// Define date ranges for seasons
+var year = 2023; // Change to your desired year
+
+var seasons = {
+  'Spring': [ee.Date.fromYMD(year, 3, 1), ee.Date.fromYMD(year, 5, 31)],
+  'Summer': [ee.Date.fromYMD(year, 6, 1), ee.Date.fromYMD(year, 8, 31)],
+  'Autumn': [ee.Date.fromYMD(year, 9, 1), ee.Date.fromYMD(year, 11, 30)],
+  'Winter': [ee.Date.fromYMD(year, 12, 1), ee.Date.fromYMD(year + 1, 2, 28)]
+};
+
+// Function to calculate NDVI
+function calculateNDVI(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// Function to get seasonal NDVI composite
+function getSeasonalNDVI(seasonName, startDate, endDate) {
+  // Load Sentinel-2 imagery
+  var collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    .filterBounds(ROI)
+    .filterDate(startDate, endDate)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
+    .map(calculateNDVI);
+  
+  // Create median composite
+  var composite = collection.median();
+  
+  // Clip to study area
+  var clipped = composite.clip(ROI);
+  
+  // Select NDVI band
+  var ndvi = clipped.select('NDVI');
+  
+  return ndvi.set({
+    'season': seasonName,
+    'year': year,
+    'system:time_start': startDate.millis(),
+    'system:time_end': endDate.millis()
+  });
+}
+
+// Generate seasonal NDVI images
+var seasonalNDVI = ee.ImageCollection(ee.List(Object.keys(seasons).map(function(season) {
+  var dates = seasons[season];
+  return getSeasonalNDVI(season, dates[0], dates[1]);
+})));
+
+// Print collection info
+print('Seasonal NDVI Collection:', seasonalNDVI);
+
+// Add visualization parameters
+var ndviParams = {
+  min: -1,
+  max: 1,
+  palette: ['blue', 'white', 'green']
+};
+
+// Display each season on the map
+Object.keys(seasons).forEach(function(season, index) {
+  var seasonImage = seasonalNDVI.filter(ee.Filter.eq('season', season)).first();
+  
+  Map.addLayer(seasonImage, ndviParams, season + ' NDVI ' + year, false);
+});
+
+// Center map on study area
+Map.centerObject(aoi, 10);
+
+// Function to download images
+function downloadSeasonalImages() {
+  Object.keys(seasons).forEach(function(season) {
+    var seasonImage = seasonalNDVI.filter(ee.Filter.eq('season', season)).first();
+    
+    // Export to Google Drive
+    Export.image.toDrive({
+      image: seasonImage,
+      description: 'NDVI_' + season + '_' + year,
+      folder: 'GEE_Exports', // Change to your folder name
+      scale: 10, // 10m resolution for Sentinel-2
+      region: aoi,
+      maxPixels: 1e9,
+      crs: 'EPSG:4326', // WGS84 projection
+      fileFormat: 'GeoTIFF'
+    });
+  });
+}
+
+// Function to download as a single multi-band image
+function downloadMultiBand() {
+  // Combine all seasons into one multi-band image
+  var bandNames = [];
+  var seasonalBands = [];
+  
+  Object.keys(seasons).forEach(function(season) {
+    var seasonImage = seasonalNDVI.filter(ee.Filter.eq('season', season)).first();
+    var bandName = 'NDVI_' + season;
+    seasonalBands.push(seasonImage.rename(bandName));
+    bandNames.push(bandName);
+  });
+  
+  var multiBandImage = ee.Image.cat(seasonalBands);
+  
+  // Export multi-band image
+  Export.image.toDrive({
+    image: multiBandImage,
+    description: 'Seasonal_NDVI_' + year,
+    folder: 'GEE_Exports',
+    scale: 10,
+    region: aoi,
+    maxPixels: 1e9,
+    crs: 'EPSG:4326',
+    fileFormat: 'GeoTIFF'
+  });
+}
+
+// Function to calculate seasonal statistics
+function calculateSeasonalStats() {
+  var statsResults = [];
+  
+  Object.keys(seasons).forEach(function(season) {
+    var seasonImage = seasonalNDVI.filter(ee.Filter.eq('season', season)).first();
+    
+    var stats = seasonImage.reduceRegion({
+      reducer: ee.Reducer.mean().combine({
+        reducer2: ee.Reducer.stdDev(),
+        sharedInputs: true
+      }),
+      geometry: studyArea,
+      scale: 10,
+      maxPixels: 1e9
+    });
+    
+    var seasonStats = {
+      'Season': season,
+      'Mean_NDVI': stats.get('NDVI_mean'),
+      'StdDev_NDVI': stats.get('NDVI_stdDev')
+    };
+    
+    statsResults.push(seasonStats);
+  });
+  
+  // Print statistics
+  print('Seasonal NDVI Statistics:', statsResults);
+}
+
+// UI Controls for the script
+var panel = ui.Panel({
+  style: {
+    width: '300px',
+    padding: '10px'
+  }
+});
+
+// Add title
+var title = ui.Label('Seasonal NDVI Download Tool', {
+  fontWeight: 'bold',
+  fontSize: '16px'
+});
+panel.add(title);
+
+// Year selector
+var yearLabel = ui.Label('Select Year:');
+var yearSelect = ui.Select({
+  items: ['2020', '2021', '2022', '2023', '2024'],
+  value: '2023',
+  onChange: function(value) {
+    year = parseInt(value);
+    // Regenerate images when year changes
+    regenerateImages();
+  }
+});
+
+// Buttons for different operations
+var downloadSingleBtn = ui.Button({
+  label: 'Download Individual Seasons',
+  onClick: downloadSeasonalImages
+});
+
+var downloadMultiBtn = ui.Button({
+  label: 'Download Multi-band Image',
+  onClick: downloadMultiBand
+});
+
+var statsBtn = ui.Button({
+  label: 'Calculate Statistics',
+  onClick: calculateSeasonalStats
+});
+
+// Add components to panel
+panel.add(yearLabel);
+panel.add(yearSelect);
+panel.add(ui.Label(' ')); // Spacer
+panel.add(downloadSingleBtn);
+panel.add(downloadMultiBtn);
+panel.add(statsBtn);
+
+// Add panel to map
+Map.add(panel);
+
+// Function to regenerate images when parameters change
+function regenerateImages() {
+  // Clear existing layers
+  Map.layers().reset();
+  
+  // Regenerate seasonal images
+  seasonalNDVI = ee.ImageCollection(ee.List(Object.keys(seasons).map(function(season) {
+    var dates = seasons[season];
+    return getSeasonalNDVI(season, dates[0], dates[1]);
+  })));
+  
+  // Redisplay layers
+  Object.keys(seasons).forEach(function(season, index) {
+    var seasonImage = seasonalNDVI.filter(ee.Filter.eq('season', season)).first();
+    Map.addLayer(seasonImage, ndviParams, season + ' NDVI ' + year, false);
+  });
+  
+  Map.addLayer(ROI, {color: 'red'}, 'Study Area', false);
+}
+
+// Add study area boundary
+Map.addLayer(ROI, {color: 'red'}, 'Study Area', false);
+
+// Print instructions
+print('INSTRUCTIONS:');
+print('1. Define your study area polygon (replace "geometry" with your area)');
+print('2. Adjust the year if needed');
+print('3. Use the buttons in the panel to download images or calculate statistics');
+print('4. Check the "Tasks" tab to run the exports to Google Drive');
